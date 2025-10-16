@@ -2,104 +2,103 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 
-TAGS_MAP = {
-    "%A": "authors",          # can appear multiple times
+# Map of tags we care about
+TAGS = {
+    "%A": "authors",          # can repeat
     "%T": "title",
     "%D": "year_published",
-    "%X": "abstract",
+    "%X": "abstract",         # may span multiple lines (continuations)
     "%R": "doi",
-    "%0": "_record_start",    # marks a new record
+    "%0": "_start",           # marks start of a new record
 }
 
-def parse_exportlist(file_path: str | Path) -> pd.DataFrame:
-    file_path = Path(file_path)
-    lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+def parse_exportlist(path: str | Path) -> pd.DataFrame:
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
 
     records = []
     current = None
-    last_field = None  # track which field should receive continuation lines
+    last_field = None  # the field that continuation lines should append to
 
-    def finalize_record():
-        """Push a copy of current into records with normalized fields."""
+    def finalize():
         if not current:
             return
-        # Normalize authors to a single string; handle missing keys gracefully
-        authors_list = current.get("authors", [])
-        current_out = {
-            "authors": "; ".join(authors_list) if authors_list else "",
+        # Normalize output
+        out = {
+            "authors": "; ".join(current.get("authors", [])),
             "title": current.get("title", ""),
             "abstract": current.get("abstract", ""),
             "year published": current.get("year_published", ""),
             "DOI": current.get("doi", ""),
         }
-        records.append(current_out)
+        records.append(out)
 
     for raw in lines:
-        line = raw.strip()
-        if not line:
-            # blank line: treat as separator but keep current record open
-            last_field = None
-            continue
+        line = raw.rstrip()
 
-        if len(line) >= 3 and line[:2] == "%" and line[2] == " ":
+        # tag line looks like "%X something"
+        if len(line) >= 3 and line.startswith("%") and line[2] == " ":
             tag = line[:2]
             value = line[3:].strip()
 
-            # new record?
             if tag == "%0":
-                # finalize the previous record
-                finalize_record()
+                # new record
+                finalize()
                 current = {"authors": []}
                 last_field = None
                 continue
 
-            # make sure we have a record dict to write into
+            # ensure we have a record dict
             if current is None:
                 current = {"authors": []}
 
-            mapped = TAGS_MAP.get(tag)
-            if not mapped:
-                # Unhandled tag → ignore and reset continuation
+            field = TAGS.get(tag)
+            if not field:
                 last_field = None
                 continue
 
-            if mapped == "authors":
+            if field == "authors":
                 current["authors"].append(value)
-                last_field = "authors"  # (continuations into authors are rare; safe to allow)
-            elif mapped == "_record_start":
-                # handled above
-                last_field = None
+                last_field = "authors"  # (rarely used for continuations)
+            elif field == "year_published":
+                # keep the first 4-digit year if present
+                # some %D lines include extra text
+                import re
+                m = re.search(r"\b(\d{4})\b", value)
+                current["year_published"] = m.group(1) if m else value
+                last_field = "year_published"
             else:
-                # single-value fields; append if continuing later
-                if mapped in current and current[mapped]:
-                    current[mapped] += " " + value
+                # title, abstract, doi
+                # allow later continuations to append
+                if field in current and current[field]:
+                    current[field] += " " + value
                 else:
-                    current[mapped] = value
-                last_field = mapped
+                    current[field] = value
+                last_field = field
+
         else:
-            # Continuation line (no leading %). Append to the last field if sensible.
+            # continuation line (no leading % tag)
             if current is not None and last_field in {"abstract", "title"}:
                 current[last_field] = (current.get(last_field, "") + " " + line).strip()
             else:
-                # Often these are stray dates (e.g., 2024-02-15) or notes; ignore.
+                # ignore stray dates/notes/etc.
                 pass
 
-    # finalize last record
-    finalize_record()
+    # last record
+    finalize()
 
-    df = pd.DataFrame.from_records(records, columns=["authors", "title", "abstract", "year published", "DOI"])
-    return df
-
+    return pd.DataFrame.from_records(
+        records, columns=["authors", "title", "abstract", "year published", "DOI"]
+    )
 
 if __name__ == "__main__":
-    # Adjust path if your file lives elsewhere; from your screenshot it's in docs_folder
-    src = Path(__file__).parent / "exportlist.txt"
+    src = Path(__file__).parent / "exportlist.txt"   # make sure the file name matches
     df = parse_exportlist(src)
 
-    # Preview a few rows
+    # quick peek
     print(df.head(3).to_string(index=False))
 
-    # Save for your app / ChatGPT helper to load later
+    # save for later steps (ChatGPT scoring, etc.)
     out_csv = Path(__file__).parent / "parsed_articles.csv"
     df.to_csv(out_csv, index=False, encoding="utf-8")
     print(f"\nSaved {len(df)} rows to {out_csv}")
