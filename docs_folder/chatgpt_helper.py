@@ -1,21 +1,33 @@
+from openai import OpenAI
+from keys import open_ai_api_key
+
+client = OpenAI(api_key=open_ai_api_key)
+
+prompt = "Add 1+2+...+20"
+
+chat = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": prompt}],
+    temperature=0,
+)
+
+print(chat.choices[0].message.content)
+
+prompt1 = "write a haiku about an orange cat"
+chat = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": prompt1}],
+    temperature=0,
+)
+
+print(chat.choices[0].message.content)
+
+##Creating a safe file for keys.py
+
+from dotenv import load_dotenv
 import os
-from openai import OpenAI  # pip install openai --upgrade
-from keys import open_ai_api_key  # you must enter your OpenAI API key in a file called keys.py
 
-client = OpenAI(
-    api_key=open_ai_api_key
-)
+load_dotenv()
+api_key = os.getenv("open_ai_api_key")
+##This part didn't work!!
 
-prompt = (
-    "Could you do this math for me? 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16+17+18+19+20"
-)   
-
-response = client.responses.create(
-    model="gpt-4.1",   
-    input=prompt,
-    temperature=0,  # do not be creative!
-    text={"format": {"type": "text"}}, # defaults to markdown unless specified otherwise in prompt!
-)
-
-result = response.output_text
-print(result)
