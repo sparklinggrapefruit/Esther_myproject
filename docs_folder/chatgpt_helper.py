@@ -22,12 +22,8 @@ chat = client.chat.completions.create(
 
 print(chat.choices[0].message.content)
 
-##Creating a safe file for keys.py
+import pandas as pd
+from pathlib import Path
 
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
-api_key = os.getenv("open_ai_api_key")
-##This part didn't work!!
+df = pd.read_csv(Path(__file__).parent / "parsed_articles.csv")
 
