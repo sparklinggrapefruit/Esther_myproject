@@ -1,62 +1,104 @@
-#Setting up the environment
-pip install pandas openai matplotlib tkinter
-
+from __future__ import annotations
+from pathlib import Path
 import pandas as pd
-from tkinter import filedialog, Tk
 
-def upload_file():
-    root = Tk()
-    root.withdraw()  
-    file_path = filedialog.askopenfilename(title="Select a file", filetypes=(("Text files", "*.txt"),))
-    if file_path:
-        # Assuming each article is separated by a new line and each field by a comma.
-        df = pd.read_csv(file_path, delimiter=',', names=['Title', 'Authors', 'Abstract', 'Year', 'DOI'])
-        print(df.head())  # For debugging: shows first few rows
-        return df
-    else:
-        print("No file selected.")
-        return None
+# Map of tags we care about
+TAGS = {
+    "%A": "authors",          # can repeat
+    "%T": "title",
+    "%D": "year_published",
+    "%X": "abstract",         # may span multiple lines (continuations)
+    "%R": "doi",
+    "%0": "_start",           # marks start of a new record
+}
 
-# Testing file upload
+def parse_exportlist(path: str | Path) -> pd.DataFrame:
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+    records = []
+    current = None
+    last_field = None  # the field that continuation lines should append to
+
+    def finalize():
+        if not current:
+            return
+        # Normalize output
+        out = {
+            "authors": "; ".join(current.get("authors", [])),
+            "title": current.get("title", ""),
+            "abstract": current.get("abstract", ""),
+            "year published": current.get("year_published", ""),
+            "DOI": current.get("doi", ""),
+        }
+        records.append(out)
+
+    for raw in lines:
+        line = raw.rstrip()
+
+        # tag line looks like "%X something"
+        if len(line) >= 3 and line.startswith("%") and line[2] == " ":
+            tag = line[:2]
+            value = line[3:].strip()
+
+            if tag == "%0":
+                # new record
+                finalize()
+                current = {"authors": []}
+                last_field = None
+                continue
+
+            # ensure we have a record dict
+            if current is None:
+                current = {"authors": []}
+
+            field = TAGS.get(tag)
+            if not field:
+                last_field = None
+                continue
+
+            if field == "authors":
+                current["authors"].append(value)
+                last_field = "authors"  # (rarely used for continuations)
+            elif field == "year_published":
+                # keep the first 4-digit year if present
+                # some %D lines include extra text
+                import re
+                m = re.search(r"\b(\d{4})\b", value)
+                current["year_published"] = m.group(1) if m else value
+                last_field = "year_published"
+            else:
+                # title, abstract, doi
+                # allow later continuations to append
+                if field in current and current[field]:
+                    current[field] += " " + value
+                else:
+                    current[field] = value
+                last_field = field
+
+        else:
+            # continuation line (no leading % tag)
+            if current is not None and last_field in {"abstract", "title"}:
+                current[last_field] = (current.get(last_field, "") + " " + line).strip()
+            else:
+                # ignore stray dates/notes/etc.
+                pass
+
+    # last record
+    finalize()
+
+    return pd.DataFrame.from_records(
+        records, columns=["authors", "title", "abstract", "year published", "DOI"]
+    )
+
 if __name__ == "__main__":
-    articles_df = upload_file()
+    src = Path(__file__).parent / "exportlist.txt"   # make sure the file name matches
+    df = parse_exportlist(src)
 
-import re
-import pandas as pd
+    # quick peek
+    print(df.head(3).to_string(index=False))
 
-def parse_file(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        data = file.read()
-
-    # Regular expressions to match each field
-    authors_pattern = r"%A (.*?)\n"
-    title_pattern = r"%T (.*?)\n"
-    abstract_pattern = r"%X (.*?)\n"
-    year_pattern = r"%D (.*?)\n"
-    doi_pattern = r"%R (.*?)\n"
-
-    # Find all matches
-    authors = re.findall(authors_pattern, data)
-    titles = re.findall(title_pattern, data)
-    abstracts = re.findall(abstract_pattern, data)
-    years = re.findall(year_pattern, data)
-    dois = re.findall(doi_pattern, data)
-
-    # Organize the data into a dictionary
-    parsed_data = {
-        "Authors": ["; ".join(authors[i:i+1]) for i in range(0, len(authors))],  # Combine authors for each article
-        "Title": titles,
-        "Abstract": abstracts,
-        "Year Published": years,
-        "DOI": dois
-    }
-
-    # Convert to DataFrame for easier manipulation
-    df = pd.DataFrame(parsed_data)
-    
-    return df
-
-# Test the function
-file_path = "/mnt/data/exportlist.txt"
-articles_df = parse_file(file_path)
-print(articles_df.head())
+    # save for later steps (ChatGPT scoring, etc.)
+    out_csv = Path(__file__).parent / "parsed_articles.csv"
+    df.to_csv(out_csv, index=False, encoding="utf-8")
+    print(f"\nSaved {len(df)} rows to {out_csv}")
