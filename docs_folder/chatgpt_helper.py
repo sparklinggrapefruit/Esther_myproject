@@ -20,10 +20,4 @@ chat = client.chat.completions.create(
     temperature=0,
 )
 
-print(chat.choices[0].message.content)
-
-import pandas as pd
-from pathlib import Path
-
-df = pd.read_csv(Path(__file__).parent / "parsed_articles.csv")
 
