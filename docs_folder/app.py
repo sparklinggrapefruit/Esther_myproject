@@ -36,7 +36,7 @@ def parse_exportlist(path: str | Path) -> pd.DataFrame:
     for raw in lines:
         line = raw.rstrip()
 
-        # tag line looks like "%X something"
+        
         if len(line) >= 3 and line.startswith("%") and line[2] == " ":
             tag = line[:2]
             value = line[3:].strip()
