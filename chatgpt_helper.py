@@ -11,7 +11,8 @@ import pandas as pd
 from openai import AsyncOpenAI
 import openai
 
-from keys import open_ai_api_key
+from config_loader import get_api_key
+
 
 
 # ---- CONFIG ----
@@ -31,7 +32,7 @@ MAX_CONCURRENT_REQUESTS = 5    # Control concurrency to respect rate limits
 DEFAULT_INPUT_CSV = Path("data/parsed_articles.csv")
 DEFAULT_OUTPUT_CSV = Path("data/parsed_articles_scored.csv")
 
-client = AsyncOpenAI(api_key=open_ai_api_key)
+client = AsyncOpenAI(api_key=get_api_key())
 
 
 def build_messages(theme: str, title: str, abstract: str):

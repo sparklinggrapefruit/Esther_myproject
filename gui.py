@@ -27,7 +27,7 @@ from typing import List, Dict, Optional
 
 import pandas as pd
 from openai import OpenAI
-from keys import open_ai_api_key
+from config_loader import get_api_key_gui
 
 # -------------------- OpenAI CONFIG -------------------- #
 
@@ -40,7 +40,14 @@ DEFAULT_THEME = (
 MODEL = "gpt-4o-mini"
 TEMPERATURE = 0
 
-client = OpenAI(api_key=open_ai_api_key)
+# Get the API key using the GUI helper
+api_key = get_api_key_gui()
+if not api_key:
+    # User cancelled or didn't provide a key – exit the app
+    raise SystemExit("OpenAI API key is required to run this app.")
+
+client = OpenAI(api_key=api_key)
+
 
 
 # -------------------- PARSING LOGIC -------------------- #
