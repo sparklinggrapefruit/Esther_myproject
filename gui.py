@@ -31,11 +31,7 @@ from config_loader import get_api_key_gui
 
 # -------------------- OpenAI CONFIG -------------------- #
 
-DEFAULT_THEME = (
-    "Looking for articles that examined intervention studies which measure physical activity "
-    "and that use mobile apps and/or wearable technology either to measure PA and/or deliver "
-    "an intervention intended to influence PA levels."
-)
+DEFAULT_THEME = ""
 
 MODEL = "gpt-4o-mini"
 TEMPERATURE = 0
@@ -150,52 +146,52 @@ def parse_endnote_export(path: Path) -> pd.DataFrame:
 
 def build_messages(theme: str, title: str, abstract: str):
     """
-    Build strict messages so the model returns ONLY an integer 1–10.
+    Build messages so the model scores relevance to the *given theme* on a 1–10 scale.
+    This is fully generic and works for any research question.
     """
     abstract = abstract if isinstance(abstract, str) else ""
     title = title if isinstance(title, str) else ""
 
     system_msg = (
-        "You are an expert in physical activity (PA) research, scoring abstracts for a systematic review. "
-        "Score RELEVANCE to the stated theme on a 1–10 integer scale. "
-        "Return ONLY the integer (no text, no explanations)."
+        "You are an expert researcher helping with a systematic review. "
+        "Given a research theme/question and an article's title and abstract, "
+        "score how RELEVANT the article is to that theme on a 1–10 integer scale. "
+        "Return ONLY the integer (no text, no explanations). "
+        "Use only the information in the title and abstract."
     )
 
     user_msg = f"""
-Theme:
+Research theme / question:
 {theme}
 
 Scoring rubric (return ONLY a single integer 1–10):
-10 = Intervention study clearly about physical activity (PA) AND uses a mobile app or wearable tech to measure PA and/or deliver the PA intervention; the abstract provides clear evidence of both.
-8–9 = Strong match: intervention on PA with mobile app/wearable clearly present, but details may be limited or mixed; still obviously on-target.
-6–7 = Reasonably relevant: PA is targeted and technology is present, but the tech may not be integral to measurement or intervention; or the design is not clearly an intervention.
-4–5 = Weak/unclear: mentions PA or mobile/wearable tech but not both; or tech is unrelated to PA; or focus is general health with minimal PA-specific intervention.
-2–3 = Barely relevant: tangential reference to PA or to technology, but not used to influence/measure PA; likely not an intervention.
-1 = Unrelated to PA intervention and unrelated to mobile/wearable tech for PA measurement or intervention.
 
-Important inclusion points:
-- Must involve PA (e.g., steps, MVPA, exercise) AND either:
-  (a) use a mobile app/wearable to measure PA, or
-  (b) use a mobile app/wearable to deliver an intervention that intends to change PA.
+10 = Extremely strong match. The article is clearly and directly about the theme above;
+     the research question, methods, and outcomes are highly aligned.
+8–9 = Strong match. The article is clearly related to the theme and substantially focused on it,
+       but may be missing some aspects or has a somewhat broader scope.
+6–7 = Moderate match. The article is partially about the theme or addresses it as one of several
+       topics, but it is not the central focus.
+4–5 = Weak match. The article has only a tangential or indirect connection to the theme.
+2–3 = Barely related. The article is largely about something else, with only minor overlap.
+1   = Unrelated. The article does not meaningfully address the theme above.
 
-Important exclusions / down-weights:
-- Technology unrelated to PA (e.g., general EHRs with no PA measurement/intervention).
-- Studies about mental health or surgery, etc., without PA intervention focus.
-- Pure observational without intervention AND without mobile/wearable PA measurement.
-- Fitness tech mentioned but not used to measure or intervene on PA.
+Instructions:
+- Base your score ONLY on the title and abstract below.
+- Interpret "relevance" as how helpful this article would be for a systematic review on the theme.
+- Return ONLY a single integer from 1 to 10 with no additional text.
 
 Title: {title or "(no title)"}
 
 Abstract:
 {abstract or "(no abstract)"}
-
-Return ONLY a single integer 1–10, nothing else.
 """.strip()
 
     return [
         {"role": "system", "content": system_msg},
         {"role": "user", "content": user_msg},
     ]
+
 
 
 def extract_score(text: str) -> Optional[int]:
@@ -276,7 +272,7 @@ class SRAppGUI:
 
         self.theme_text = tk.Text(theme_frame, height=6, wrap="word")
         self.theme_text.pack(fill=tk.BOTH, expand=True)
-        self.theme_text.insert("1.0", DEFAULT_THEME)
+      
 
         # Middle frame: scoring controls
         mid = ttk.Frame(self.root, padding=(10, 0))
@@ -402,7 +398,11 @@ class SRAppGUI:
 
         theme = self.theme_text.get("1.0", "end").strip()
         if not theme:
-            theme = DEFAULT_THEME
+            messagebox.showwarning(
+                "Missing theme",
+                "Please enter a research theme or question before running relevance scoring.",
+            )
+            return
 
         n = len(self.df)
         self.progress_var.set(f"Scoring {n} articles...")

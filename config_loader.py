@@ -70,27 +70,19 @@ def get_api_key_gui() -> Optional[str]:
     GUI-friendly way to get the API key (for your Tkinter app).
 
     Order:
-    1) Environment variable
-    2) Local JSON config
-    3) Tkinter password-style dialog
-    """
-    # 1) Environment variable
-    key = os.getenv(ENV_VAR_NAME)
-    if key and key.strip():
-        return key.strip()
+    1) Local JSON config
+    2) Tkinter password-style dialog
 
-    # 2) Local config file
+    (We deliberately ignore environment variables here so GUI behavior is predictable.)
+    """
+    # 1) Local config file
     key = _read_config()
     if key:
         return key
 
-    # 3) Tkinter dialog
-    try:
-        import tkinter as tk
-        from tkinter import simpledialog, messagebox
-    except Exception:
-        # If Tkinter isn't available for some reason, fall back to console
-        return get_api_key()
+    # 2) Tkinter dialog ONLY (no console fallback here)
+    import tkinter as tk
+    from tkinter import simpledialog, messagebox
 
     root = tk.Tk()
     root.withdraw()  # Hide the root window
