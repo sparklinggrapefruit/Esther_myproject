@@ -106,4 +106,4 @@ def get_api_key_gui() -> Optional[str]:
     key = key.strip()
     _write_config(key)
     root.destroy()
-    return key
+    return
