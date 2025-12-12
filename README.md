@@ -47,13 +47,13 @@ You are responsible for any **API costs** associated with your use of this tool.
 
 ### 3.1 Locating `SysReviewHelper.exe`
 
-1. Download this project (for example, from GitHub as a ZIP) and extract it, **or** use the provided ZIP that already contains the built executable.  
+1. Download this project (from GitHub as a ZIP) and extract it, **or** use the provided ZIP that already contains the built executable.  
 2. Inside the extracted folder, look for:
 
    ```text
    dist/SysReviewHelper.exe
-(or wherever your instructions say the .exe is located).
-3. You can move SysReviewHelper.exe to any folder you like (e.g., your Desktop or a “Tools” folder).
+
+3. You can move SysReviewHelper.exe to any folder you like (e.g., your Desktop).
 
 ### 3.2 First-Time Run and API Key Prompt
 
