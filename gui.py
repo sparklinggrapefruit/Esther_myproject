@@ -12,6 +12,8 @@ Workflow:
 from __future__ import annotations
 
 import sys
+import threading
+import traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
@@ -22,7 +24,7 @@ import pandas as pd
 # Local storage next to exe
 from config_loader import load_api_key, save_api_key
 
-# Async scoring engine
+# Async scoring engine (your module)
 from chatgpt_helper import init_openai_client, run_scoring
 
 
@@ -144,8 +146,14 @@ class SRAppGUI:
         self.current_file: Optional[Path] = None
         self.progress_var = tk.StringVar(value="Ready.")
 
+        # Thread state
+        self._scoring_thread: threading.Thread | None = None
+        self._cancel_requested: bool = False
+
         self._build_layout()
         self._build_menu()
+
+    # ---------- UI Helpers ---------- #
 
     def _build_menu(self):
         menubar = tk.Menu(self.root)
@@ -188,6 +196,14 @@ class SRAppGUI:
         )
         self.score_btn.pack(side=tk.LEFT)
 
+        self.cancel_btn = ttk.Button(
+            mid,
+            text="Cancel scoring",
+            command=self.on_cancel_scoring,
+            state=tk.DISABLED,
+        )
+        self.cancel_btn.pack(side=tk.LEFT, padx=(10, 0))
+
         export_btn = ttk.Button(mid, text="Export scored CSV", command=self.on_export_csv)
         export_btn.pack(side=tk.LEFT, padx=(10, 0))
 
@@ -215,6 +231,31 @@ class SRAppGUI:
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
+    def _set_ui_scoring_state(self, running: bool):
+        if running:
+            self.score_btn.config(state=tk.DISABLED)
+            self.cancel_btn.config(state=tk.NORMAL)
+        else:
+            can_score = self.df is not None and not self.df.empty
+            self.score_btn.config(state=tk.NORMAL if can_score else tk.DISABLED)
+            self.cancel_btn.config(state=tk.DISABLED)
+
+    def _populate_table(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        if self.df is None:
+            return
+
+        for idx, row in self.df.iterrows():
+            title = (row.get("title") or "").strip()
+            title_display = title[:147] + "..." if len(title) > 150 else title
+            year = (row.get("year_published") or "").strip()
+            doi = (row.get("doi") or "").strip()
+            score = row.get("relevancy_score", "")
+
+            self.tree.insert("", "end", iid=str(idx), values=(title_display, year, doi, score))
+
     # ---------- Handlers ---------- #
 
     def on_change_api_key(self):
@@ -234,6 +275,11 @@ class SRAppGUI:
             messagebox.showinfo("Updated", "API key updated and saved locally.")
         except Exception as e:
             messagebox.showerror("Error", f"Could not update API key:\n{e}")
+
+    def on_cancel_scoring(self):
+        self._cancel_requested = True
+        self.progress_var.set("Cancel requested… finishing current requests.")
+        self.root.update_idletasks()
 
     def on_upload_file(self):
         file_path = filedialog.askopenfilename(
@@ -261,29 +307,13 @@ class SRAppGUI:
             self.df = df
             self.current_file = path
             self.file_label.config(text=f"Loaded: {path.name}")
-            self.score_btn.config(state=tk.NORMAL)
             self.progress_var.set(f"Parsed {len(df)} articles.")
             self._populate_table()
+            self.score_btn.config(state=tk.NORMAL)
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to parse file:\n{e}")
             self.progress_var.set("Error while parsing.")
-
-    def _populate_table(self):
-        for row in self.tree.get_children():
-            self.tree.delete(row)
-
-        if self.df is None:
-            return
-
-        for idx, row in self.df.iterrows():
-            title = (row.get("title") or "").strip()
-            title_display = title[:147] + "..." if len(title) > 150 else title
-            year = (row.get("year_published") or "").strip()
-            doi = (row.get("doi") or "").strip()
-            score = row.get("relevancy_score", "")
-
-            self.tree.insert("", "end", iid=str(idx), values=(title_display, year, doi, score))
 
     def on_run_scoring(self):
         if self.df is None or self.df.empty:
@@ -295,26 +325,51 @@ class SRAppGUI:
             messagebox.showwarning("Missing theme", "Please enter a research theme/question before scoring.")
             return
 
-        # Write input CSV where the scoring pipeline expects it
+        # Prevent starting twice
+        if self._scoring_thread and self._scoring_thread.is_alive():
+            messagebox.showinfo("Scoring already running", "Scoring is already in progress.")
+            return
+
+        # Save input CSV where scorer expects it
         input_csv = data_dir() / "parsed_articles.csv"
         output_csv = data_dir() / "parsed_articles_scored.csv"
         self.df.to_csv(input_csv, index=False, encoding="utf-8")
 
-        try:
-            self.progress_var.set("Scoring… (this may take a while)")
-            self.root.update_idletasks()
+        self._cancel_requested = False
+        self._set_ui_scoring_state(True)
+        self.progress_var.set("Scoring… (running in background)")
+        self.root.update_idletasks()
 
-            run_scoring(theme, input_csv, output_csv)
+        def worker():
+            try:
+                # This keeps the GUI responsive.
+                # Note: true mid-run cancel requires chatgpt_helper to support it.
+                run_scoring(theme, input_csv, output_csv)
 
-            scored = pd.read_csv(output_csv)
-            self.df = scored
-            self._populate_table()
-            self.progress_var.set("Scoring complete.")
-            messagebox.showinfo("Done", f"Saved scored CSV to:\n{output_csv}")
+                # Load results
+                scored = pd.read_csv(output_csv)
 
-        except Exception as e:
-            messagebox.showerror("Error", f"Scoring failed:\n{e}")
-            self.progress_var.set("Scoring failed.")
+                def on_success():
+                    self.df = scored
+                    self._populate_table()
+                    self.progress_var.set("Scoring complete.")
+                    self._set_ui_scoring_state(False)
+                    messagebox.showinfo("Done", f"Saved scored CSV to:\n{output_csv}")
+
+                self.root.after(0, on_success)
+
+            except Exception as e:
+                err = f"{e}\n\n{traceback.format_exc()}"
+
+                def on_fail():
+                    self.progress_var.set("Scoring failed.")
+                    self._set_ui_scoring_state(False)
+                    messagebox.showerror("Error", f"Scoring failed:\n{err}")
+
+                self.root.after(0, on_fail)
+
+        self._scoring_thread = threading.Thread(target=worker, daemon=True)
+        self._scoring_thread.start()
 
     def on_export_csv(self):
         if self.df is None or self.df.empty:
