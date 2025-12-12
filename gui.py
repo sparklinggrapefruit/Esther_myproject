@@ -1,110 +1,109 @@
 """
-Simple Tkinter GUI for your systematic review helper.
+Simple Tkinter GUI for your systematic review helper (.exe friendly).
 
 Workflow:
-1. Click "Upload EndNote .txt file" → select exportlist.txt (or any similar EndNote export).
-   - GUI parses %A, %T, %D, %R, %X into a DataFrame:
-       columns = authors, title, abstract, year_published, doi
-   - Table shows the parsed articles.
-
-2. Edit the "Research theme / question" text if desired.
-
-3. Click "Run relevance scoring".
-   - Calls OpenAI for each abstract and gets a score 1–10.
-   - Adds a 'relevancy_score' column.
-   - Updates the table and progress label.
-
-4. Click "Export scored CSV" to save the results.
+1) App launches -> prompts for OpenAI API key (one-time) and saves it locally next to the .exe
+2) Upload EndNote .txt export
+3) Enter theme
+4) Run relevance scoring (writes scored CSV)
+5) Export CSV
 """
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from __future__ import annotations
 
+import sys
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
-import re
-import time
 from typing import List, Dict, Optional
 
 import pandas as pd
-from openai import OpenAI
-from config_loader import get_api_key_gui
 
-# -------------------- OpenAI CONFIG -------------------- #
+# Local storage next to exe
+from config_loader import load_api_key, save_api_key
 
-DEFAULT_THEME = ""
+# Async scoring engine
+from chatgpt_helper import init_openai_client, run_scoring
 
-MODEL = "gpt-4o-mini"
-TEMPERATURE = 0
 
-# Get the API key using the GUI helper
-api_key = get_api_key_gui()
-if not api_key:
-    # User cancelled or didn't provide a key – exit the app
-    raise SystemExit("OpenAI API key is required to run this app.")
+# -------------------- Paths (exe-friendly) -------------------- #
 
-client = OpenAI(api_key=api_key)
+def app_dir() -> Path:
+    """
+    Directory containing the .exe (PyInstaller) or this script (dev).
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
+
+def data_dir() -> Path:
+    d = app_dir() / "data"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+# -------------------- API Key Prompt (on launch) -------------------- #
+
+def prompt_for_api_key(root: tk.Tk) -> str | None:
+    """
+    Get API key from storage next to exe; if missing, prompt user once and save it.
+    """
+    key = load_api_key()
+    if key:
+        return key
+
+    key = simpledialog.askstring(
+        "OpenAI API Key Required",
+        "Paste your OpenAI API key to enable relevance scoring.\n\n"
+        "• Starts with sk- or sk-proj-\n"
+        "• Saved locally next to this app (not uploaded)\n",
+        show="*",
+        parent=root,
+    )
+    if not key:
+        return None
+
+    key = key.strip()
+    save_api_key(key)
+    return key
 
 
 # -------------------- PARSING LOGIC -------------------- #
 
 def parse_endnote_export(path: Path) -> pd.DataFrame:
     """
-    Parse an EndNote-style export list (.txt) where:
-      - Authors:   %A
-      - Title:     %T
-      - Year:      %D
-      - DOI/URL:   %R
-      - Abstract:  %X (may span multiple lines until next % code)
-
-    Returns a DataFrame with columns:
-        authors, title, abstract, year_published, doi
+    Parse EndNote-style export list (.txt) where:
+      %A = author (repeat)
+      %T = title
+      %D = year
+      %R = doi/url
+      %X = abstract (can span multiple lines)
+      %0 = start new record
     """
     text = path.read_text(encoding="utf-8", errors="ignore")
     lines = text.splitlines()
 
     records: List[Dict[str, object]] = []
-    current = {
-        "authors": [],
-        "title": "",
-        "abstract": "",
-        "year": "",
-        "doi": "",
-    }
+    current = {"authors": [], "title": "", "abstract": "", "year": "", "doi": ""}
     in_abstract = False
 
     def push_current():
-        # push only if there's at least some meaningful content
-        if (
-            current["authors"]
-            or current["title"]
-            or current["abstract"]
-            or current["year"]
-            or current["doi"]
-        ):
+        if current["authors"] or current["title"] or current["abstract"] or current["year"] or current["doi"]:
             records.append({
                 "authors": "; ".join(current["authors"]),
-                "title": current["title"].strip(),
-                "abstract": current["abstract"].strip(),
-                "year_published": current["year"].strip(),
-                "doi": current["doi"].strip(),
+                "title": str(current["title"]).strip(),
+                "abstract": str(current["abstract"]).strip(),
+                "year_published": str(current["year"]).strip(),
+                "doi": str(current["doi"]).strip(),
             })
 
     for raw_line in lines:
         line = raw_line.rstrip("\n")
 
-        # Start of a new record
         if line.startswith("%0 "):
-            # push previous record if any
             push_current()
-            # reset
-            current = {
-                "authors": [],
-                "title": "",
-                "abstract": "",
-                "year": "",
-                "doi": "",
-            }
+            current = {"authors": [], "title": "", "abstract": "", "year": "", "doi": ""}
             in_abstract = False
             continue
 
@@ -121,109 +120,16 @@ def parse_endnote_export(path: Path) -> pd.DataFrame:
             current["doi"] = line[3:].strip()
             in_abstract = False
         elif line.startswith("%X "):
-            # start of abstract (may continue onto subsequent lines)
             current["abstract"] = line[3:].strip()
             in_abstract = True
         elif line.startswith("%"):
-            # some other field - stop capturing abstract
             in_abstract = False
         else:
-            # continuation line: if we are in abstract, add to it
             if in_abstract and line.strip():
-                if current["abstract"]:
-                    current["abstract"] += " " + line.strip()
-                else:
-                    current["abstract"] = line.strip()
+                current["abstract"] = (str(current["abstract"]) + " " + line.strip()).strip()
 
-    # push last record
     push_current()
-
-    df = pd.DataFrame(records)
-    return df
-
-
-# -------------------- SCORING LOGIC -------------------- #
-
-def build_messages(theme: str, title: str, abstract: str):
-    """
-    Build messages so the model scores relevance to the *given theme* on a 1–10 scale.
-    This is fully generic and works for any research question.
-    """
-    abstract = abstract if isinstance(abstract, str) else ""
-    title = title if isinstance(title, str) else ""
-
-    system_msg = (
-        "You are an expert researcher helping with a systematic review. "
-        "Given a research theme/question and an article's title and abstract, "
-        "score how RELEVANT the article is to that theme on a 1–10 integer scale. "
-        "Return ONLY the integer (no text, no explanations). "
-        "Use only the information in the title and abstract."
-    )
-
-    user_msg = f"""
-Research theme / question:
-{theme}
-
-Scoring rubric (return ONLY a single integer 1–10):
-
-10 = Extremely strong match. The article is clearly and directly about the theme above;
-     the research question, methods, and outcomes are highly aligned.
-8–9 = Strong match. The article is clearly related to the theme and substantially focused on it,
-       but may be missing some aspects or has a somewhat broader scope.
-6–7 = Moderate match. The article is partially about the theme or addresses it as one of several
-       topics, but it is not the central focus.
-4–5 = Weak match. The article has only a tangential or indirect connection to the theme.
-2–3 = Barely related. The article is largely about something else, with only minor overlap.
-1   = Unrelated. The article does not meaningfully address the theme above.
-
-Instructions:
-- Base your score ONLY on the title and abstract below.
-- Interpret "relevance" as how helpful this article would be for a systematic review on the theme.
-- Return ONLY a single integer from 1 to 10 with no additional text.
-
-Title: {title or "(no title)"}
-
-Abstract:
-{abstract or "(no abstract)"}
-""".strip()
-
-    return [
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg},
-    ]
-
-
-
-def extract_score(text: str) -> Optional[int]:
-    """
-    Pull a clean integer 1–10 out of the model's text response.
-    """
-    if not isinstance(text, str):
-        return None
-    m = re.search(r"\b(10|[1-9])\b", text.strip())
-    if not m:
-        return None
-    score = int(m.group(1))
-    return max(1, min(10, score))
-
-
-def score_one_article(theme: str, title: str, abstract: str) -> Optional[int]:
-    """
-    Call the OpenAI API once and return an integer 1–10, or None on failure.
-    """
-    msgs = build_messages(theme, title, abstract)
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=msgs,
-            temperature=TEMPERATURE,
-        )
-        content = resp.choices[0].message.content
-        score = extract_score(content)
-        return score
-    except Exception as e:
-        print(f"Error scoring article: {e}")
-        return None
+    return pd.DataFrame(records)
 
 
 # -------------------- GUI CLASS -------------------- #
@@ -234,23 +140,24 @@ class SRAppGUI:
         self.root.title("Systematic Review Helper")
         self.root.geometry("1100x700")
 
-        # DataFrame holding articles
         self.df: Optional[pd.DataFrame] = None
         self.current_file: Optional[Path] = None
-
-        # Progress text
         self.progress_var = tk.StringVar(value="Ready.")
 
         self._build_layout()
+        self._build_menu()
 
-    # ---------- Layout ---------- #
+    def _build_menu(self):
+        menubar = tk.Menu(self.root)
+        settings = tk.Menu(menubar, tearoff=0)
+        settings.add_command(label="Change API Key", command=self.on_change_api_key)
+        menubar.add_cascade(label="Settings", menu=settings)
+        self.root.config(menu=menubar)
 
     def _build_layout(self):
-        # Top frame: file upload + theme
         top = ttk.Frame(self.root, padding=10)
         top.pack(side=tk.TOP, fill=tk.X)
 
-        # File section
         file_frame = ttk.LabelFrame(top, text="1. Article list", padding=10)
         file_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
 
@@ -261,20 +168,15 @@ class SRAppGUI:
         )
         upload_btn.pack(anchor="w")
 
-        self.file_label = ttk.Label(
-            file_frame, text="No file loaded yet.", foreground="gray"
-        )
+        self.file_label = ttk.Label(file_frame, text="No file loaded yet.", foreground="gray")
         self.file_label.pack(anchor="w", pady=(5, 0))
 
-        # Theme section
         theme_frame = ttk.LabelFrame(top, text="2. Research theme / question", padding=10)
         theme_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
         self.theme_text = tk.Text(theme_frame, height=6, wrap="word")
         self.theme_text.pack(fill=tk.BOTH, expand=True)
-      
 
-        # Middle frame: scoring controls
         mid = ttk.Frame(self.root, padding=(10, 0))
         mid.pack(side=tk.TOP, fill=tk.X)
 
@@ -282,36 +184,21 @@ class SRAppGUI:
             mid,
             text="3. Run relevance scoring",
             command=self.on_run_scoring,
-            state=tk.DISABLED,  # enabled only after file is parsed
+            state=tk.DISABLED,
         )
         self.score_btn.pack(side=tk.LEFT)
 
-        export_btn = ttk.Button(
-            mid,
-            text="Export scored CSV",
-            command=self.on_export_csv,
-        )
+        export_btn = ttk.Button(mid, text="Export scored CSV", command=self.on_export_csv)
         export_btn.pack(side=tk.LEFT, padx=(10, 0))
 
-        # Progress label
-        progress_label = ttk.Label(
-            mid,
-            textvariable=self.progress_var,
-            foreground="blue",
-        )
+        progress_label = ttk.Label(mid, textvariable=self.progress_var, foreground="blue")
         progress_label.pack(side=tk.RIGHT)
 
-        # Bottom frame: table
         bottom = ttk.Frame(self.root, padding=10)
         bottom.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         columns = ("title", "year", "doi", "score")
-        self.tree = ttk.Treeview(
-            bottom,
-            columns=columns,
-            show="headings",
-            selectmode="browse",
-        )
+        self.tree = ttk.Treeview(bottom, columns=columns, show="headings", selectmode="browse")
         self.tree.heading("title", text="Title")
         self.tree.heading("year", text="Year")
         self.tree.heading("doi", text="DOI")
@@ -330,6 +217,24 @@ class SRAppGUI:
 
     # ---------- Handlers ---------- #
 
+    def on_change_api_key(self):
+        key = simpledialog.askstring(
+            "Change OpenAI API Key",
+            "Paste your new OpenAI API key:",
+            show="*",
+            parent=self.root,
+        )
+        if not key:
+            return
+
+        key = key.strip()
+        try:
+            save_api_key(key)
+            init_openai_client(key)
+            messagebox.showinfo("Updated", "API key updated and saved locally.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not update API key:\n{e}")
+
     def on_upload_file(self):
         file_path = filedialog.askopenfilename(
             title="Select EndNote export .txt file",
@@ -344,11 +249,10 @@ class SRAppGUI:
             self.root.update_idletasks()
 
             df = parse_endnote_export(path)
-
             if df.empty:
                 messagebox.showwarning(
                     "No records found",
-                    "The file was parsed but no valid records were found.\n\n"
+                    "Parsed file but no valid records found.\n\n"
                     "Check that it is an EndNote export with %A, %T, %D, %R, %X tags.",
                 )
                 self.progress_var.set("Ready.")
@@ -366,7 +270,6 @@ class SRAppGUI:
             self.progress_var.set("Error while parsing.")
 
     def _populate_table(self):
-        # Clear existing rows
         for row in self.tree.get_children():
             self.tree.delete(row)
 
@@ -375,21 +278,12 @@ class SRAppGUI:
 
         for idx, row in self.df.iterrows():
             title = (row.get("title") or "").strip()
-            if len(title) > 150:
-                title_display = title[:147] + "..."
-            else:
-                title_display = title
-
+            title_display = title[:147] + "..." if len(title) > 150 else title
             year = (row.get("year_published") or "").strip()
             doi = (row.get("doi") or "").strip()
             score = row.get("relevancy_score", "")
 
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(idx),
-                values=(title_display, year, doi, score),
-            )
+            self.tree.insert("", "end", iid=str(idx), values=(title_display, year, doi, score))
 
     def on_run_scoring(self):
         if self.df is None or self.df.empty:
@@ -398,59 +292,33 @@ class SRAppGUI:
 
         theme = self.theme_text.get("1.0", "end").strip()
         if not theme:
-            messagebox.showwarning(
-                "Missing theme",
-                "Please enter a research theme or question before running relevance scoring.",
-            )
+            messagebox.showwarning("Missing theme", "Please enter a research theme/question before scoring.")
             return
 
-        n = len(self.df)
-        self.progress_var.set(f"Scoring {n} articles...")
-        self.root.update_idletasks()
+        # Write input CSV where the scoring pipeline expects it
+        input_csv = data_dir() / "parsed_articles.csv"
+        output_csv = data_dir() / "parsed_articles_scored.csv"
+        self.df.to_csv(input_csv, index=False, encoding="utf-8")
 
-        scores: List[Optional[int]] = []
-        failures = 0
-
-        for idx, row in self.df.iterrows():
-            title = row.get("title", "")
-            abstract = row.get("abstract", "")
-
-            self.progress_var.set(f"Scoring article {idx + 1} / {n} ...")
+        try:
+            self.progress_var.set("Scoring… (this may take a while)")
             self.root.update_idletasks()
 
-            score = score_one_article(theme, title, abstract)
-            if score is None:
-                failures += 1
+            run_scoring(theme, input_csv, output_csv)
 
-            scores.append(score)
-            # Update table row as we go
-            self.tree.set(str(idx), "score", "" if score is None else str(score))
+            scored = pd.read_csv(output_csv)
+            self.df = scored
+            self._populate_table()
+            self.progress_var.set("Scoring complete.")
+            messagebox.showinfo("Done", f"Saved scored CSV to:\n{output_csv}")
 
-            # Tiny sleep so the UI doesn't look frozen
-            time.sleep(0.1)
-
-        self.df["relevancy_score"] = scores
-
-        if failures:
-            self.progress_var.set(
-                f"Scoring complete with {failures} failures out of {n} articles."
-            )
-        else:
-            self.progress_var.set("Scoring complete for all articles.")
-
-        messagebox.showinfo(
-            "Done",
-            f"Relevancy scoring finished.\n\n"
-            f"Articles scored: {n}\n"
-            f"Failed: {failures}",
-        )
+        except Exception as e:
+            messagebox.showerror("Error", f"Scoring failed:\n{e}")
+            self.progress_var.set("Scoring failed.")
 
     def on_export_csv(self):
         if self.df is None or self.df.empty:
-            messagebox.showwarning(
-                "No data",
-                "There is no data to export yet.\n\nUpload a file and/or run scoring first.",
-            )
+            messagebox.showwarning("No data", "No data to export yet.")
             return
 
         save_path = filedialog.asksaveasfilename(
@@ -473,6 +341,22 @@ class SRAppGUI:
 
 def main():
     root = tk.Tk()
+
+    # Prompt immediately on launch
+    key = prompt_for_api_key(root)
+    if not key:
+        messagebox.showinfo("Exit", "No API key provided. Exiting.")
+        root.destroy()
+        return
+
+    # Initialize the OpenAI client used by chatgpt_helper.py
+    try:
+        init_openai_client(key)
+    except Exception as e:
+        messagebox.showerror("OpenAI Error", f"Could not initialize API client:\n{e}")
+        root.destroy()
+        return
+
     app = SRAppGUI(root)
     root.mainloop()
 

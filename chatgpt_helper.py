@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -11,8 +10,40 @@ import pandas as pd
 from openai import AsyncOpenAI
 import openai
 
-from config_loader import get_api_key
 
+# -----------------------------
+# OpenAI client initialization
+# -----------------------------
+client: AsyncOpenAI | None = None
+
+
+def init_openai_client(api_key: str) -> None:
+    """
+    Initialize the OpenAI Async client once (call this from GUI on app startup).
+    """
+    global client
+    api_key = (api_key or "").strip()
+
+    if not api_key:
+        raise ValueError("Empty API key.")
+
+    # Soft validation (helps users catch copy/paste mistakes)
+    if not api_key.startswith("sk-"):
+        raise ValueError("That doesn't look like an OpenAI API key (should start with 'sk-').")
+
+    client = AsyncOpenAI(api_key=api_key)
+
+
+def _require_client() -> AsyncOpenAI:
+    """
+    Ensure the OpenAI client has been initialized before any scoring call.
+    """
+    if client is None:
+        raise RuntimeError(
+            "OpenAI client not initialized.\n\n"
+            "Please enter your OpenAI API key when the app opens."
+        )
+    return client
 
 
 # ---- CONFIG ----
@@ -30,8 +61,6 @@ MAX_CONCURRENT_REQUESTS = 5    # Control concurrency to respect rate limits
 
 DEFAULT_INPUT_CSV = Path("data/parsed_articles.csv")
 DEFAULT_OUTPUT_CSV = Path("data/parsed_articles_scored.csv")
-
-client = AsyncOpenAI(api_key=get_api_key())
 
 
 def build_messages(theme: str, title: str, abstract: str):
@@ -83,7 +112,6 @@ Abstract:
     ]
 
 
-
 def extract_score(text: str) -> int | None:
     """
     Pull a clean integer 1-10 out of the model's text response.
@@ -97,19 +125,24 @@ def extract_score(text: str) -> int | None:
     return max(1, min(10, score))
 
 
-async def score_one_async(title: str,
-                          abstract: str,
-                          semaphore: asyncio.Semaphore,
-                          theme: str) -> int | None:
+async def score_one_async(
+    title: str,
+    abstract: str,
+    semaphore: asyncio.Semaphore,
+    theme: str
+) -> int | None:
     """
     Async scoring of a single article with semaphore for rate limiting
     and robust error handling.
     """
+    c = _require_client()
+
     async with semaphore:
         msgs = build_messages(theme, title, abstract)
+
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                resp = await client.chat.completions.create(
+                resp = await c.chat.completions.create(
                     model=MODEL,
                     messages=msgs,
                     temperature=TEMPERATURE,
@@ -126,24 +159,36 @@ async def score_one_async(title: str,
                 await asyncio.sleep(backoff_time)
 
             except openai.APIError as e:
-                if "quota" in str(e).lower() or "billing" in str(e).lower():
-                    print("💳 ASYNC QUOTA/BILLING ERROR:", e)
-                    print("   Check your OpenAI account billing and usage limits.")
-                else:
-                    print(f"🔧 ASYNC API ERROR (attempt {attempt}): {e}")
+                msg = str(e).lower()
+
+                # Friendly handling for the most common failures
+                if "401" in msg or "invalid_api_key" in msg or "incorrect api key" in msg:
+                    print("❌ INVALID API KEY (401).")
+                    print("   The provided key is not accepted by OpenAI.")
+                    print("   If using a project key (sk-proj-...), ensure billing/model access is enabled.")
+                    return None
+
+                if "quota" in msg or "billing" in msg:
+                    print("💳 BILLING / QUOTA ERROR.")
+                    print("   Check your OpenAI billing status and usage limits.")
+                    return None
+
+                print(f"🔧 ASYNC API ERROR (attempt {attempt}): {e}")
                 await asyncio.sleep(1.0 * attempt)
 
             except Exception as e:
                 error_str = str(e).lower()
+
                 if "rate limit" in error_str or "429" in error_str:
                     print("⚠️ ASYNC RATE LIMIT WARNING:", e)
                     backoff_time = 2.0 * attempt
                     print(f"   Backing off for {backoff_time:.1f}s...")
                     await asyncio.sleep(backoff_time)
+
                 elif "quota" in error_str or "billing" in error_str:
-                    print("💳 ASYNC QUOTA ERROR:", e)
-                    print("   Check your OpenAI account billing and usage limits.")
+                    print("💳 ASYNC QUOTA/BILLING ERROR:", e)
                     await asyncio.sleep(1.0 * attempt)
+
                 else:
                     print(f"❌ ASYNC attempt {attempt} failed:", e)
                     await asyncio.sleep(0.5 * attempt)
@@ -151,8 +196,10 @@ async def score_one_async(title: str,
         return None
 
 
-async def process_batch_async(articles: List[Tuple[int, str, str]],
-                              theme: str) -> List[Tuple[int, Optional[int]]]:
+async def process_batch_async(
+    articles: List[Tuple[int, str, str]],
+    theme: str
+) -> List[Tuple[int, Optional[int]]]:
     """
     Process a batch of articles asynchronously.
     articles: List of (index, title, abstract)
@@ -195,12 +242,14 @@ async def process_batch_async(articles: List[Tuple[int, str, str]],
     return processed
 
 
-async def main_async(theme: str,
-                     input_csv: Path = DEFAULT_INPUT_CSV,
-                     output_csv: Path = DEFAULT_OUTPUT_CSV):
+async def main_async(
+    theme: str,
+    input_csv: Path = DEFAULT_INPUT_CSV,
+    output_csv: Path = DEFAULT_OUTPUT_CSV
+):
     if not input_csv.exists():
         raise FileNotFoundError(
-            f"Could not find {input_csv}. Make sure you ran parser.py to create it."
+            f"Could not find {input_csv}. Make sure you created parsed_articles.csv first."
         )
 
     df = pd.read_csv(input_csv)
@@ -226,30 +275,33 @@ async def main_async(theme: str,
     results = await process_batch_async(articles, theme)
 
     results.sort(key=lambda x: x[0])
-    scores = [score for idx, score in results]
+    scores = [score for _, score in results]
 
     end_time = time.time()
     print(f"Async processing completed in {end_time - start_time:.2f} seconds")
 
     df["relevancy_score"] = scores
-    output_csv.parent.mkdir(exist_ok=True)
+    output_csv.parent.mkdir(exist_ok=True, parents=True)
     df.to_csv(output_csv, index=False, encoding="utf-8")
 
     print(df[["title", "relevancy_score"]].head(10).to_string(index=False))
     print(f"\nSaved {len(df)} rows to {output_csv}")
 
 
-def run_scoring(theme: str,
-                input_csv: str | Path = DEFAULT_INPUT_CSV,
-                output_csv: str | Path = DEFAULT_OUTPUT_CSV):
+def run_scoring(
+    theme: str,
+    input_csv: str | Path = DEFAULT_INPUT_CSV,
+    output_csv: str | Path = DEFAULT_OUTPUT_CSV
+):
     """
-    Synchronous wrapper so we can call scoring from GUI or CLI.
+    Synchronous wrapper so we can call scoring from GUI.
+    NOTE: Requires init_openai_client(api_key) to have been called already.
     """
     input_csv = Path(input_csv)
     output_csv = Path(output_csv)
     asyncio.run(main_async(theme, input_csv, output_csv))
 
 
-if __name__ == "__main__":
-    # CLI usage: just uses the default THEME
-    run_scoring(THEME)
+# NOTE:
+# We intentionally do NOT provide a __main__ CLI runner here,
+# because the intended workflow is a packaged .exe that prompts for the key on startup.
