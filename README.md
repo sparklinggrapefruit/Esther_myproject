@@ -22,8 +22,8 @@ To use this app, you will need:
 
 1. A **Windows computer** (tested on Windows 10/11).  
 2. An **OpenAI account** and a valid **OpenAI API key**.  
-3. An **EndNote / ProQuest-style tagged `.txt` export** of your articles.  
-4. The `SysReviewHelper.exe` file (included in this repository or release).
+3. An **Clarivate Endnote`.txt` export** of your articles.  
+4. The `SysReviewHelper.exe` file (included in this repository).
 
 You do **not** need to install Python or any other development tools if you are only using the `.exe`.
 
@@ -67,6 +67,9 @@ You are responsible for any **API costs** associated with your use of this tool.
 8. If you ever want to reset this key, see the troubleshooting section below.
 9. After you enter the key, the main app window will open.
 
+-----
+# 4. Before Using the App
+
 ### 4.1 Preparing Your Input File
 The app expects a tagged text export from EndNote / ProQuest that looks roughly like this:
 %0 Journal Article
@@ -92,7 +95,10 @@ If your export uses a different format (for example RIS, BibTeX, or plain CSV), 
 Pro tip: USE EndNote Clarivate to organize your artiles and export it as txt.
 EndNote Clarivate link: https://access.clarivate.com/login?app=endnote
 
-### 5.1 Using the Step by Step
+---
+# 5. Using the app
+
+### 5.1 Using the app Step by Step
 When the main window is open, you will see three main areas:
 - Top-left: file upload section
 - Top-right: research theme / question box
@@ -158,6 +164,8 @@ When the main window is open, you will see three main areas:
     - relevancy_score (1–10)
 You can open this CSV in Excel, R, Python, or any other tool to sort, filter, and continue your screening process.
 
+--- 
+
 ## 6. Troubleshooting & Common Issues
 
 ### 6.1 The App Keeps Asking for an API Key
@@ -191,6 +199,8 @@ For many articles (e.g., hundreds), this will take a noticeable amount of time, 
 If the scoring looks off, try re-writing your theme to be more specific and clear. 
 Reminder that this tool is meant to help you prioritize and triage articles, not replace your judgement. 
 
+---
+
 ## 7. Known Limitations
 1. The app currently supports only tagged .txt exports with the specific % tags described above. Other formats (RIS, BibTeX, etc.) are not supported.
 2. The scoring is AI-based and may sometimes misjudge relevance. Use it as a helper, not a final decision-maker. Be conservative about the scoring cut-off that you want to include/exclude in your final review.
@@ -198,12 +208,16 @@ Reminder that this tool is meant to help you prioritize and triage articles, not
 4. The app does not perform deduplication of articles (for example, it does not detect duplicate DOIs automatically).
 For more technical limitations, design decisions, and ideas for future work, see the Developer’s Guide.
 
+---
+
 # 8. Acknowledgements
 This app is built using:
 1. OpenAI's Python library for relevance scoring
 2. pandas for data handling
 3. Python's built-in Tkinter for the GUI
 And thank you to Dr. Chris Harding for all the feedbacks and improvements to help shape this tool
+
+---
 
 # 9. User's Acknowledgements
 Feel free to distribute, share or use this tool as needed for class, personal projects or papers, but please do so with acknowledgements to the developer. If you use this tool for your systematic review project, please acknowledge this tool "SysReviewHelper" and my name "Hyun Seon (Esther), Kim" in your paper or project reports. 
